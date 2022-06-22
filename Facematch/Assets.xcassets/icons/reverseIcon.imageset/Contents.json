@@ -1,0 +1,22 @@
+{
+  "images" : [
+    {
+      "filename" : "np_reverse_2195068_000000 1.pdf",
+      "idiom" : "universal"
+    },
+    {
+      "appearances" : [
+        {
+          "appearance" : "luminosity",
+          "value" : "dark"
+        }
+      ],
+      "filename" : "np_reverse_2195068_000000 1 (1).pdf",
+      "idiom" : "universal"
+    }
+  ],
+  "info" : {
+    "author" : "xcode",
+    "version" : 1
+  }
+}

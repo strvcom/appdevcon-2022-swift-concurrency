@@ -1,0 +1,16 @@
+//
+//  Local.swift
+//  Facematch
+//
+//  Created by Jan Kaltoun on 10.03.2021.
+//
+
+// Configuration settings file format documentation can be found at:
+// https://help.apple.com/xcode/#/dev745c5c974
+
+APP_BUNDLE_NAME = Facematch LOC
+IOS_BUNDLE_IDENTIFIER = com.strv.facematch.local
+WATCH_BUNDLE_IDENTIFIER = com.strv.facematch.local.watch
+WATCH_EXTENSION_BUNDLE_IDENTIFIER = com.strv.facematch.local.watch.extension
+API_BASE_URL = http:/$()/127.0.0.1:8080/api/
+KEYCHAIN_GROUP = com.strv.facematch.sharedKeychain.local

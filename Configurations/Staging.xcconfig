@@ -1,0 +1,18 @@
+//
+//  Staging.xcconfig
+//  Facematch
+//
+//  Created by strv on 09.03.2021.
+//
+
+// Configuration settings file format documentation can be found at:
+// https://help.apple.com/xcode/#/dev745c5c974
+
+APP_BUNDLE_NAME = Facematch STG
+IOS_BUNDLE_IDENTIFIER = com.strv.facematch.staging
+TV_BUNDLE_IDENTIFIER = com.strv.facematch.staging.tv
+WATCH_BUNDLE_IDENTIFIER = com.strv.facematch.staging.watch
+WATCH_EXTENSION_BUNDLE_IDENTIFIER = com.strv.facematch.staging.watch.extension
+SENTRY_DSN = https:/$()/cb5434c7563a4505bdb7b524e6c5b049@o498104.ingest.sentry.io/5606629
+API_BASE_URL = https:/$()/facematch-backend-staging.herokuapp.com/api/
+KEYCHAIN_GROUP = com.strv.facematch.sharedKeychain.staging

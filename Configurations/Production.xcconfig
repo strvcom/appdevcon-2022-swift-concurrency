@@ -1,0 +1,18 @@
+//
+//  Production.xcconfig
+//  Facematch
+//
+//  Created by Gaston Mazzeo on 1/26/21.
+//
+
+// Configuration settings file format documentation can be found at:
+// https://help.apple.com/xcode/#/dev745c5c974
+
+APP_BUNDLE_NAME = Facematch
+IOS_BUNDLE_IDENTIFIER = com.strv.facematch
+TV_BUNDLE_IDENTIFIER = com.strv.facematch.tv
+WATCH_BUNDLE_IDENTIFIER = com.strv.facematch.watch
+WATCH_EXTENSION_BUNDLE_IDENTIFIER = com.strv.facematch.watch.extension
+SENTRY_DSN = https:/$()/cb5434c7563a4505bdb7b524e6c5b049@o498104.ingest.sentry.io/5606629
+API_BASE_URL = https:/$()/facematch-backend.herokuapp.com/api/
+KEYCHAIN_GROUP = com.strv.facematch.sharedKeychain
