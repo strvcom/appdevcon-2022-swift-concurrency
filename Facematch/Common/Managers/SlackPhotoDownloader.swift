@@ -27,6 +27,10 @@ extension SlackPhotoDownloader {
         apiManager.fetch(url: member.smallPhotoUrl)
     }
     
+    func downloadSmallSlackPhotoData(of member: APIMember) async throws -> Data {
+        try await apiManager.fetch(url: member.smallPhotoUrl)
+    }
+    
     func downloadSlackPhoto<T: UserWithPhoto>(of user: T) -> AnyPublisher<URL, Error> {
         apiManager.download(url: user.profileImageURL)
             .tryMap(weak: self) { downloader, downloadedFileURL in

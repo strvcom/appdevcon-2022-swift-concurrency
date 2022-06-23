@@ -18,7 +18,7 @@ struct ProgressState {
     static let initial = ProgressState(syncedItems: 1, images: [])
 }
 
-class SyncStore: ObservableObject {
+@MainActor class SyncStore: ObservableObject {
     static let lastSyncUserDefaultsKey = "last_sync"
     static let syncRefreshThreshold: TimeInterval = 60*60*24*7 // 7 days
     static let syncTimeDifferenceThreshold: TimeInterval = 3
@@ -31,6 +31,8 @@ class SyncStore: ObservableObject {
 
     var syncCancellable: AnyCancellable?
     var networkCancellable: AnyCancellable?
+    
+    var syncTask: Task<Void, Never>?
 
     @Published var state = State.requiresSync
 
@@ -65,87 +67,101 @@ class SyncStore: ObservableObject {
     }
 
     func sync() {
-        do {
-            try photoStorageManager.reset()
-        } catch {
-            state = .syncFailed(error: SyncError.filesystemStorageFailed)
+        syncTask = Task {
+            do {
+                try photoStorageManager.reset()
+            } catch {
+                state = .syncFailed(error: SyncError.filesystemStorageFailed)
 
-            return
-        }
-        
-        state = .syncing(
-            progress: 0,
-            description: "Downloading list of Slack members.",
-            images: []
-        )
-        
-        var lastStateUpdate = Date()
-        var membersInfo: [(APIMember, Data)] = []
-        
-        syncCancellable = loadSlackMemberData()
-            .flatMap(weak: self) { store, members -> AnyPublisher<[ProgressState], Error> in
-                store.cleanLocalCache(in: store.coreDataManager.viewContext)
-                
-                return Publishers.MergeMany(
-                    members.map { member in
-                        store.downloadSmallSlackPhotoData(of: member)
-                            .tryMap { imageData in
-                                membersInfo.append((member, imageData))
-                            }
-                            .flatMap {
-                                return store.downloadSlackPhoto(of: member)
-                            }
-                            .eraseToAnyPublisher()
-                    }
-                )
-                .collect(1)
-                .scan(ProgressState.initial) { progressState, url in
-                    ProgressState(
-                        syncedItems: progressState.syncedItems + 1,
-                        images: progressState.images + url
-                    )
-                }
-                .receive(on: DispatchQueue.main)
-                .handleOutput(weak: self) { store, progressState in
-                    let numberOfItemsToSync = members.count + 1
-                    let syncProgress = Double(progressState.syncedItems) / Double(numberOfItemsToSync)
-
-                    let timeDifference = Date().timeIntervalSince(lastStateUpdate)
-                    
-                    // Updating syncing state only if the difference is more than 1%
-                    // and after 3 seconds after the last update at least
-                    // to avoid re-rendering
-                    if
-                        syncProgress - store.state.syncProgress > 0.01,
-                        timeDifference > Self.syncTimeDifferenceThreshold
-                    {
-                        lastStateUpdate = Date()
-                        
-                        store.state = .syncing(
-                            progress: syncProgress,
-                            description: "Downloading photo \(progressState.syncedItems) of \(numberOfItemsToSync).",
-                            images: progressState.images
-                        )
-                    }
-                }
-                .collect()
-                .eraseToAnyPublisher()
+                return
             }
-            .map { [weak self] _ -> State in
-                self?.save(membersInfo: membersInfo)
+            
+            state = .syncing(
+                progress: 0,
+                description: "Downloading list of Slack members.",
+                images: []
+            )
+            
+            var lastStateUpdate = Date()
+            var membersInfo: [(APIMember, Data)] = []
+            var numberOfSyncedItems = 0
+            var downloadedImageURLs: [URL] = .init()
+            
+            do {
+                let members = try await loadSlackMemberData()
+                
+                let numberOfItemsToSync = members.count + 1
+                
+                try await cleanLocalCache()
+                
+                try await withThrowingTaskGroup(
+                    of: (
+                        member: APIMember,
+                        smallPhotoData: Data,
+                        largePhotoURL: URL
+                    ).self
+                ) { group in
+                    for member in members {
+                        group.addTask {
+                            print("[SYNC] Downloading data for: \(member)")
+                            
+                            async let smallPhotoData = self.downloadSmallSlackPhotoData(of: member)
+                            
+                            async let largePhotoLocalURL =  self.downloadSlackPhoto(of: member)
+                            
+                            return try await (
+                                member: member,
+                                smallPhotoData: smallPhotoData,
+                                largePhotoURL: largePhotoLocalURL
+                            )
+                        }
+                    }
+                    
+                    for try await memberInfo in group {
+                        print("[SYNC] Downloaded data for: \(memberInfo)")
+                        
+                        membersInfo.append(
+                            (memberInfo.member, memberInfo.smallPhotoData)
+                        )
+                        
+                        numberOfSyncedItems += 1
+                        downloadedImageURLs.append(memberInfo.largePhotoURL)
+                        
+                        let syncProgress = Double(numberOfSyncedItems) / Double(numberOfItemsToSync)
+
+                        let timeDifference = Date().timeIntervalSince(lastStateUpdate)
+                        
+                        // Updating syncing state only if the difference is more than 1%
+                        // and after 3 seconds after the last update at least
+                        // to avoid re-rendering
+                        if
+                            syncProgress - state.syncProgress > 0.01,
+                            timeDifference > Self.syncTimeDifferenceThreshold
+                        {
+                            lastStateUpdate = Date()
+                            
+                            print("[SYNC] Downloading photo \(numberOfSyncedItems) of \(numberOfItemsToSync).")
+                            
+                            state = .syncing(
+                                progress: syncProgress,
+                                description: "Downloading photo \(numberOfSyncedItems) of \(numberOfItemsToSync).",
+                                images: downloadedImageURLs
+                            )
+                        }
+                    }
+                }
+                
+                try await save(membersInfo: membersInfo)
 
                 UserDefaults.standard.setValue(Date(), forKey: Self.lastSyncUserDefaultsKey)
 
-                try? self?.photoStorageManager.blessTemporaryDirectory()
-
-                return .synced(initial: false)
+                try? photoStorageManager.blessTemporaryDirectory()
+                
+                state = .synced(initial: false)
+            } catch {
+                state = .syncFailed(error: .unexpectedlyCancelled)
             }
-            .catch { error -> AnyPublisher<State, Never> in
-                Just(.syncFailed(error: .unexpectedlyCancelled))
-                    .eraseToAnyPublisher()
-            }
-            .receive(on: DispatchQueue.main)
-            .assign(to: \.state, on: self)
+        }
     }
 
     func cancelSync() {
@@ -165,7 +181,7 @@ class SyncStore: ObservableObject {
         stopCheckingNetworkType()
     }
 
-    func loadSlackMemberData() -> AnyPublisher<[APIMember], Error> {
+    func loadSlackMemberData() async throws -> [APIMember] {
         // swiftlint:disable:next force_unwrapping
         var components = URLComponents(string: "https://slack.com/api/users.list")!
 
@@ -175,30 +191,38 @@ class SyncStore: ObservableObject {
                 value: keychainManager.get(key: KeychainKeys.keychainAccessTokenKey)
             )
         ]
-
+        
         // swiftlint:disable:next force_unwrapping
-        return apiManager.fetch(url: components.url!)
-            .decode(type: APIMemberResponse.self, decoder: apiManager.decoder)
-            .map(\.members)
-            .eraseToAnyPublisher()
+        let data = try await apiManager.fetch(url: components.url!)
+        
+        let apiMemberResponse = try apiManager.decoder.decode(
+            APIMemberResponse.self,
+            from: data
+        )
+        
+        return apiMemberResponse.members
     }
 
-    func cleanLocalCache(in context: NSManagedObjectContext) {
-        let personFetchRequest: NSFetchRequest<Person> = Person.fetchRequest()
-
-        guard let result = try? context.fetch(personFetchRequest) else {
-            return
-        }
-
-        result.forEach {
-            context.delete($0)
-        }
+    func cleanLocalCache() async throws {
+        let context = coreDataManager.persistentContainer.newBackgroundContext()
         
-        try? context.save()
+        try await context.perform {
+            let personFetchRequest: NSFetchRequest<Person> = Person.fetchRequest()
+
+            let result = try context.fetch(personFetchRequest)
+
+            result.forEach {
+                context.delete($0)
+            }
+            
+            try context.save()
+        }
     }
     
-    func save(membersInfo: [(APIMember, Data)]) {
-        coreDataManager.persistentContainer.performBackgroundTask { context in
+    func save(membersInfo: [(APIMember, Data)]) async throws {
+        let context = coreDataManager.persistentContainer.newBackgroundContext()
+        
+        try await context.perform {
             membersInfo.forEach { (member, image) in
                 let person = Person(context: context)
                 
@@ -209,7 +233,7 @@ class SyncStore: ObservableObject {
                 person.image = image
             }
             
-            try? context.save()
+            try context.save()
         }
     }
     
