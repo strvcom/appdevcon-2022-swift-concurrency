@@ -14,6 +14,10 @@ protocol APIManaging {
     func fetch(url: URL) -> AnyPublisher<Data, Error>
     func download(url: URL) -> AnyPublisher<URL, Error>
     func post(url: URL, params: [String: Any]) -> AnyPublisher<Data, Error>
+    
+    func fetch(url: URL) async throws -> Data
+    func download(url: URL) async throws -> URL
+    func post(url: URL, params: [String: Any]) async throws -> Data
 }
 
 class APIManager: APIManaging {
@@ -97,5 +101,60 @@ class APIManager: APIManaging {
                 return url
             }
             .eraseToAnyPublisher()
+    }
+}
+
+extension APIManager {
+    func fetch(url: URL) async throws -> Data {
+        var request = URLRequest(url: url)
+
+        if
+            url.absoluteString.contains(Configuration.default.apiBaseURL.absoluteString),
+            let token = keychainManager.get(key: KeychainKeys.keychainBackendAccessTokenKey)
+        {
+            request.addValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        let (data, response) = try await urlSession.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse, 200..<300 ~= httpResponse.statusCode else {
+            throw APIError.unknown
+        }
+        
+        return data
+    }
+    
+    @discardableResult func post(url: URL, params: [String: Any]) async throws -> Data {
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+
+        let jsonData = try? JSONSerialization.data(withJSONObject: params)
+        request.httpBody = jsonData
+
+        if
+            url.absoluteString.contains(Configuration.default.apiBaseURL.absoluteString),
+            let token = keychainManager.get(key: KeychainKeys.keychainBackendAccessTokenKey)
+        {
+            request.addValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+
+        let (data, response) = try await urlSession.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse, 200..<300 ~= httpResponse.statusCode else {
+            throw APIError.unknown
+        }
+
+        return data
+    }
+    
+    func download(url: URL) async throws -> URL {
+        let (url, response) = try await urlSession.download(from: url)
+        
+        guard let httpResponse = response as? HTTPURLResponse, 200..<300 ~= httpResponse.statusCode else {
+            throw APIError.unknown
+        }
+        
+        return url
     }
 }

@@ -38,4 +38,13 @@ extension SlackPhotoDownloader {
             }
             .eraseToAnyPublisher()
     }
+    
+    @discardableResult func downloadSlackPhoto<T: UserWithPhoto>(of user: T) async throws -> URL {
+        let downloadedFileURL = try await apiManager.download(url: user.profileImageURL)
+        
+        let localURL = photoStorageManager.temporaryDirectory.appendingPathComponent(user.path)
+        try FileManager.default.moveItem(at: downloadedFileURL, to: localURL)
+
+        return localURL
+    }
 }

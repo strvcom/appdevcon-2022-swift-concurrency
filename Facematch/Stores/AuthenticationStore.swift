@@ -10,7 +10,7 @@ import Combine
 import CoreData
 import SwiftUI
 
-class AuthenticationStore: NSObject, ObservableObject {
+@MainActor class AuthenticationStore: NSObject, ObservableObject {
     static let oauthURL: URL = {
         var components = URLComponents()
         components.scheme = "https"
@@ -63,7 +63,9 @@ class AuthenticationStore: NSObject, ObservableObject {
 
                 store.state = .temporaryAuthorized(code: temporaryCode)
 
-                store.finishAuthentication(code: temporaryCode)
+                Task {
+                    await store.finishAuthentication(code: temporaryCode)
+                }
             }
         )
 
@@ -72,22 +74,18 @@ class AuthenticationStore: NSObject, ObservableObject {
         webAuthSession?.start()
     }
 
-    func finishAuthentication(code: String) {
-        finishAuthenticationCancellable = exchangeCodeForAccessToken(code: code)
-            .flatMap(weak: self) { store, accessTokenResponse in
-                store.authenticateUserWithBackend(accessTokenResponse: accessTokenResponse)
-            }
-            .map { user -> State in
-                .authorized(user: user)
-            }
-            .catch { error -> AnyPublisher<State, Never> in
-                Just(.failed(error: AuthenticationError.unexpectedError))
-                    .eraseToAnyPublisher()
-            }
-            .assign(to: \.state, on: self)
+    func finishAuthentication(code: String) async {
+        do {
+            let accessTokenResponse = try await exchangeCodeForAccessToken(code: code)
+            let user = try await authenticateUserWithBackend(accessTokenResponse: accessTokenResponse)
+            
+            state = .authorized(user: user)
+        } catch {
+            state = .failed(error: AuthenticationError.unexpectedError)
+        }
     }
 
-    func exchangeCodeForAccessToken(code: String) -> AnyPublisher<SlackTokenExchangeResponse, Error> {
+    func exchangeCodeForAccessToken(code: String) async throws -> SlackTokenExchangeResponse {
         // swiftlint:disable:next force_unwrapping
         var components = URLComponents(string: "https://slack.com/api/oauth.access")!
         components.queryItems = [
@@ -95,47 +93,52 @@ class AuthenticationStore: NSObject, ObservableObject {
             URLQueryItem(name: "client_secret", value: "b65da68bfc3979c0785d813ddecbcfcc"),
             URLQueryItem(name: "code", value: code)
         ]
-
+        
         // swiftlint:disable:next force_unwrapping
-        return apiManager.fetch(url: components.url!)
-            .decode(type: SlackTokenExchangeResponse.self, decoder: apiManager.decoder)
-            .receive(on: DispatchQueue.main)
-            .handleOutput(weak: self) { store, response in
-                store.keychainManager.set(key: KeychainKeys.keychainAccessTokenKey, value: response.accessToken)
-            }
-            .eraseToAnyPublisher()
+        let data = try await apiManager.fetch(url: components.url!)
+        
+        let slackTokenExchangeResponse = try apiManager.decoder.decode(
+            SlackTokenExchangeResponse.self,
+            from: data
+        )
+        
+        keychainManager.set(
+            key: KeychainKeys.keychainAccessTokenKey,
+            value: slackTokenExchangeResponse.accessToken
+        )
+        
+        return slackTokenExchangeResponse
     }
 
-    func authenticateUserWithBackend(accessTokenResponse: SlackTokenExchangeResponse) -> AnyPublisher<LoggedUser, Error> {
+    func authenticateUserWithBackend(accessTokenResponse: SlackTokenExchangeResponse) async throws -> LoggedUser {
         let url = Configuration.default.apiBaseURL.appendingPathComponent("user/login")
         let params: [String: Any] = [
             "slackUserID": accessTokenResponse.userId,
             "accessToken": accessTokenResponse.accessToken
         ]
 
-        return apiManager.post(url: url, params: params)
-            .decode(type: LoginResponse.self, decoder: apiManager.decoder)
-            .receive(on: DispatchQueue.main)
-            .flatMap(weak: self) { store, response -> AnyPublisher<User, Error> in
-                // Reset temp directory in case user logs out and logs in again
-                store.keychainManager.set(key: KeychainKeys.keychainBackendAccessTokenKey, value: response.accessToken)
-                try? store.photoStorageManager.reset()
-
-                return store.downloadSlackPhoto(of: response.user)
-                    .map { _ in response.user }
-                    .eraseToAnyPublisher()
-            }
-            .flatMap(weak: self) { store, user in
-                store.saveLoggedUser(user: user)
-            }
-            .compactMap { [weak self] in
-                self?.fetchLoggedUser()
-            }
-            .handleOutput(weak: self) { store, user in
-                store.errorReportingManager.setUser(loggedUser: user)
-                try? store.photoStorageManager.blessTemporaryDirectory()
-            }
-            .eraseToAnyPublisher()
+        let data = try await apiManager.post(url: url, params: params)
+        
+        let loginResponse = try apiManager.decoder.decode(
+            LoginResponse.self,
+            from: data
+        )
+        
+        // Reset temp directory in case user logs out and logs in again
+        keychainManager.set(key: KeychainKeys.keychainBackendAccessTokenKey, value: loginResponse.accessToken)
+        try photoStorageManager.reset()
+        
+        try await downloadSlackPhoto(of: loginResponse.user)
+        
+        try await saveLoggedUser(user: loginResponse.user)
+        
+        let user = try fetchLoggedUser()
+        
+        errorReportingManager.setUser(loggedUser: user)
+        
+        try photoStorageManager.blessTemporaryDirectory()
+        
+        return user
     }
     
     func checkAuthorizedUser() {
@@ -143,7 +146,7 @@ class AuthenticationStore: NSObject, ObservableObject {
 
         guard
             keychainManager.has(key: KeychainKeys.keychainAccessTokenKey),
-            let user = fetchLoggedUser()
+            let user = try? fetchLoggedUser()
         else {
             state = .initial
             return
@@ -182,31 +185,31 @@ class AuthenticationStore: NSObject, ObservableObject {
 // MARK: - CRUD LoggedUser
 
 extension AuthenticationStore {
-    func fetchLoggedUser() -> LoggedUser? {
+    func fetchLoggedUser() throws -> LoggedUser {
         let context = coreDataManager.viewContext
         let fetchRequest: NSFetchRequest<LoggedUser> = LoggedUser.fetchRequest()
 
-        return try? context.fetch(fetchRequest).first
+        guard let user = try context.fetch(fetchRequest).first else {
+            throw AuthenticationError.userNotFound
+        }
+        
+        return user
     }
     
-    func saveLoggedUser(user: User) -> AnyPublisher<Void, Error> {
-        Future { [weak self] promise in
-            self?.coreDataManager.persistentContainer.performBackgroundTask { context in
-                let loggedUser = LoggedUser(context: context)
-                loggedUser.id = user.slackId
-                loggedUser.firstName = user.firstName
-                loggedUser.lastName = user.lastName
-                loggedUser.realName = user.name
+    @discardableResult func saveLoggedUser(user: User) async throws -> LoggedUser {
+        let context = coreDataManager.persistentContainer.newBackgroundContext()
+        
+        return try await context.perform {
+            let loggedUser = LoggedUser(context: context)
+            loggedUser.id = user.slackId
+            loggedUser.firstName = user.firstName
+            loggedUser.lastName = user.lastName
+            loggedUser.realName = user.name
 
-                try? context.save()
-
-                DispatchQueue.main.async {
-                    promise(.success(()))
-                }
-            }
+            try context.save()
+            
+            return loggedUser
         }
-        .receive(on: DispatchQueue.main)
-        .eraseToAnyPublisher()
     }
     
     func deleteLoggedUser() -> AnyPublisher<Void, Error> {
