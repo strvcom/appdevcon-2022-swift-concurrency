@@ -29,10 +29,8 @@ struct ProgressState {
     @Injected private var coreDataManager: CoreDataManaging
     @Injected private var networkManager: NetworkManaging
 
-    var syncCancellable: AnyCancellable?
-    var networkCancellable: AnyCancellable?
-    
     var syncTask: Task<Void, Never>?
+    var networkTask: Task<Void, Never>?
 
     @Published var state = State.requiresSync
 
@@ -171,7 +169,7 @@ struct ProgressState {
 
         try? photoStorageManager.reset()
         
-        syncCancellable?.cancel()
+        syncTask?.cancel()
 
         updateSyncState()
     }
@@ -240,17 +238,15 @@ struct ProgressState {
     func startCheckingNetworkType() {
         networkManager.startMonitoring()
         
-        networkCancellable = networkManager.networkType
-            .sink { [weak self] in
-                guard $0 == .wifi else {
-                    self?.cancelSync()
-                    return
-                }
+        networkTask = Task {
+            for await networkType in networkManager.networkType where networkType != .wifi {
+                cancelSync()
             }
+        }
     }
     
     func stopCheckingNetworkType() {
-        networkCancellable?.cancel()
+        networkTask?.cancel()
         networkManager.stopMonitoring()
     }
 }

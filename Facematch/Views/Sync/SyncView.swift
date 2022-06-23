@@ -35,7 +35,7 @@ struct SyncView: View {
             }
         }
         .onAppear {
-//            syncStore.startCheckingNetworkType()
+            syncStore.startCheckingNetworkType()
         }
         .onDisappear {
             syncStore.stopSync()
